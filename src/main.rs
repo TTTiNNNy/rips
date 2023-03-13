@@ -4,22 +4,90 @@ use std::collections::VecDeque;
 use std::env::Args;
 use std::ops::DerefMut;
 
-
 use rand::Rng;
 
-// struct Foo {
-//     pub foo: Box<dyn Fn(usize) -> usize>,
-// }
-//
-// impl Foo {
-//     fn new(foo: impl Fn(usize) -> usize + 'static) -> Self {
-//         let now = SystemTime::now();
-//         now.elapsed().unwrap().as_micros();
-//         Self { foo: Box::new(foo) }
-//     }
-// }
+struct CallbackHandler<T, ARGS> {
+    phantom: PhantomData<T>,
+    pub callback: Option<Box<dyn Fn(ARGS)>>,
+}
 
-fn fn_plug() {}
+#[derive(Clone, Copy, PartialEq)]
+pub enum PollStatus {
+    Done,
+    Process,
+}
+
+struct PollHandler<T, ARGS> {
+    phantom: PhantomData<T>,
+    pub temp_data: ARGS,
+    pub callback: Option<Box<dyn Fn(&mut ARGS) -> PollStatus>>,
+}
+
+struct PollUserHandler<T, ARGS> {
+    phantom: PhantomData<T>,
+    pub temp_data: ARGS,
+    pub callback: Option<Box<dyn Fn(&mut ARGS) -> PollStatus>>,
+}
+
+struct Executor<'a> {
+    poll_elements: VecDeque<&'a mut dyn Poll>,
+    user_funcs: VecDeque<Box<dyn Fn() -> PollStatus>>,
+}
+
+impl<'a> Executor<'a> {
+    pub fn add(new_item: &'static dyn Fn() -> PollStatus) { unsafe { GLOBAL_EXECUTER.user_funcs.push_back(Box::new(new_item)); } }
+    pub fn is_empty() -> bool { unsafe { GLOBAL_EXECUTER.poll_elements.is_empty() } }
+
+    fn poll_elements(&mut self)
+    {
+        for nb in 0..self.poll_elements.len() {
+            if (self.poll_elements[nb]).poll() == PollStatus::Done { self.poll_elements.remove(nb); }
+        }
+        for nb in 0..self.user_funcs.len() {
+            if (self.user_funcs[nb])() == PollStatus::Done { self.user_funcs.remove(nb); }
+        }
+    }
+
+    fn add_shadow(&mut self, new_item: &'a mut dyn Poll) {
+        self.poll_elements.push_back(new_item);
+    }
+
+    fn remove_at(&mut self, index: usize) {
+        self.poll_elements.remove(index);
+    }
+
+    fn is_empty_shadow(&self) -> bool {
+        self.poll_elements.is_empty()
+    }
+}
+
+pub trait Poll {
+    fn poll(&mut self) -> PollStatus;
+}
+
+impl<T, ARGS> Poll for PollHandler<T, ARGS> {
+    fn poll(&mut self) -> PollStatus {
+        unsafe {
+            let status = (self.callback.as_ref()).unwrap_unchecked()(&mut self.temp_data);
+            status
+        }
+    }
+}
+
+pub trait AsyncWork<T, U> {
+    fn setupHandler(&self, _: T);
+}
+
+static mut GLOBAL_EXECUTER: Executor = Executor { poll_elements: VecDeque::new(), user_funcs: VecDeque::new() };
+
+unsafe impl<T, ARGS> Sync for CallbackHandler<T, ARGS> {}
+
+static mut GLOBAL_TWI_WRITE: CallbackHandler<IrqTwiWrite, ()>  = CallbackHandler::<IrqTwiWrite, ()> { callback: None, phantom: PhantomData {} };
+static mut GLOBAL_TWI_READ: CallbackHandler<IrqTwiRead, usize> = CallbackHandler::<IrqTwiRead, usize> { callback: None, phantom: PhantomData {} };
+static mut GLOBAL_FLASH_WRITE: PollHandler<IrqSpiWrite, usize> = PollHandler::<IrqSpiWrite, usize> { callback: None, phantom: PhantomData {}, temp_data:  0};
+
+
+
 
 struct IrqTwiWrite {}
 
@@ -29,86 +97,10 @@ struct IrqSpiWrite {}
 
 struct IrqSpiRead {}
 
-
-struct CallbackHandler<T, ARGS> {
-    phantom: PhantomData<T>,
-    pub callback: Option<Box<dyn Fn(ARGS)>>,
-}
-
-impl<T, ARGS> CallbackHandler<T, ARGS> {
-    fn fn_plug(){}
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum PollStatus{
-    Done,
-    Process
-}
-
-struct PollHandler<T, ARGS> {
-    phantom: PhantomData<T>,
-    pub temp_data: ARGS,
-    pub callback: Option<Box<dyn Fn(&mut ARGS) -> PollStatus>>,
-}
-
-// impl<T, ARGS> PollHandler<T, ARGS> {
-//     fn fn_plug(_: ARGS) -> PollStatus {true}
-// }
-
-struct Executor<'a>{
-    poll_elements: VecDeque<&'a mut dyn Poll>
-}
-
-impl <'a>Executor<'a>{
-    fn poll_elements(&mut self)
-    {
-        for nb in 0..self.poll_elements.len() {
-            if  (self.poll_elements[nb]).poll() == PollStatus::Done {self.poll_elements.remove(nb);}
-        }
-    }
-
-    fn add(&mut self, new_item: &'a mut dyn Poll) {
-        self.poll_elements.push_back(new_item);
-    }
-
-    fn remove_at(&mut self, index: usize) {
-        self.poll_elements.remove(index);
-    }
-
-    fn is_empty(&self) -> bool{
-        self.poll_elements.is_empty()
-    }
-}
-
-pub trait Poll{
-    fn poll(&mut self) -> PollStatus;
-}
-
-impl<T, ARGS> Poll for PollHandler<T, ARGS> {
-    fn poll(&mut self) -> PollStatus {
-        unsafe {
-        let status = (self.callback.as_ref()).unwrap_unchecked()(&mut self.temp_data);
-            status
-        }
-
-    }
-}
-
-pub trait AsyncWork<T, U> {
-    fn then(&self, _: T);
-}
-
 enum IrqType {
     Write,
     Read,
 }
-
-static mut GLOBAL_TWI_WRITE: CallbackHandler<IrqTwiWrite, ()> = CallbackHandler::<IrqTwiWrite, ()> { callback: None, phantom: PhantomData {} };
-static mut GLOBAL_TWI_READ: CallbackHandler<IrqTwiRead, usize> = CallbackHandler::<IrqTwiRead, usize> { callback: None, phantom: PhantomData {} };
-static mut GLOBAL_FLASH_WRITE: PollHandler<IrqSpiWrite, usize> = PollHandler::<IrqSpiWrite, usize> { callback: None, phantom: PhantomData {}, temp_data: 0 };
-static mut GLOBAL_EXECUTER: Executor = Executor{ poll_elements: VecDeque::new() };
-
-unsafe impl<T, ARGS> Sync for CallbackHandler<T, ARGS> {}
 
 /// in real apps and sdk it will looks like twi.interrupt.add(||<MACRO_NAME>(GLOBAL_TWI_READ));
 /// or after bme280.read(); while(!bme280.is_ready){}; at thread.
@@ -146,12 +138,12 @@ struct Bme280 {
 impl Bme280 {
     pub fn write(&self, func: &'static dyn Fn(())) {
         println!("set write bme callback ");
-        <Bme280 as AsyncWork<&dyn Fn(()), IrqTwiWrite>>::then(self, func);
+        <Bme280 as AsyncWork<&dyn Fn(()), IrqTwiWrite>>::setupHandler(self, func);
         self.driver_bme_280.write();
     }
     pub fn read(&self, func: &'static dyn Fn(usize)) {
         println!("set read bme callback ");
-        <Bme280 as AsyncWork<&dyn Fn(usize), IrqTwiRead>>::then(self, func);
+        <Bme280 as AsyncWork<&dyn Fn(usize), IrqTwiRead>>::setupHandler(self, func);
         self.driver_bme_280.read();
     }
 }
@@ -194,7 +186,7 @@ struct Flash {
 
 impl Flash {
     pub fn write(&self, _str: String, func: &'static dyn Fn(&mut usize) -> PollStatus) {
-        self.then(func);
+        self.setupHandler(func);
 
         let thread_handle = thread::spawn(|| {
             DriverFlash::write();
@@ -212,13 +204,13 @@ impl Flash {
 }
 
 impl AsyncWork<&'static dyn Fn(usize), IrqTwiRead> for Bme280 {
-    fn then(&self, func: &'static dyn Fn(usize)) {
+    fn setupHandler(&self, func: &'static dyn Fn(usize)) {
         unsafe { (GLOBAL_TWI_READ).callback = Some(Box::new(func)); }
     }
 }
 
-impl <T>AsyncWork<&'static dyn Fn(()), T> for Bme280 {
-    fn then(&self, func: &'static dyn Fn(())) {
+impl<T> AsyncWork<&'static dyn Fn(()), T> for Bme280 {
+    fn setupHandler(&self, func: &'static dyn Fn(())) {
         unsafe { (GLOBAL_TWI_WRITE).callback = Some(Box::new(func)); }
     }
 }
@@ -230,10 +222,10 @@ impl <T>AsyncWork<&'static dyn Fn(()), T> for Bme280 {
 // }
 
 impl AsyncWork<&'static dyn Fn(&mut usize) -> PollStatus, IrqSpiWrite> for Flash {
-    fn then(&self, func: &'static dyn Fn(&mut usize) -> PollStatus) {
+    fn setupHandler(&self, func: &'static dyn Fn(&mut usize) -> PollStatus) {
         unsafe {
             (GLOBAL_FLASH_WRITE).callback = Some(Box::new(func));
-            GLOBAL_EXECUTER.add(&mut GLOBAL_FLASH_WRITE);
+            GLOBAL_EXECUTER.add_shadow(&mut GLOBAL_FLASH_WRITE);
         }
     }
 }
@@ -262,7 +254,14 @@ fn main() {
     thread::sleep(time::Duration::from_secs(2));
 
     unsafe {
-        while !GLOBAL_EXECUTER.is_empty() {
-            GLOBAL_EXECUTER.poll_elements(); }
+        Executor::add(&|| {
+            static mut count: usize = 0;
+            println!("New user func. count = {}", count);
+            count += 1;
+            if count > 5 { PollStatus::Done } else { PollStatus::Process }
+        });
+        while !(GLOBAL_EXECUTER.is_empty_shadow() && GLOBAL_EXECUTER.user_funcs.is_empty()) {
+            GLOBAL_EXECUTER.poll_elements();
+        }
     }
 }
